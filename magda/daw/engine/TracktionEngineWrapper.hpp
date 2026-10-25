@@ -28,6 +28,25 @@ class SessionClipScheduler;
 class SessionRecorder;
 class TracktionTempoMap;
 class TempoLaneSync;
+class TracktionEngineWrapper;
+
+/** A hosted external (AU/VST3) plugin instance living on a track. extId is
+ *  the stable handle CLI/serve clients use to address the instance. */
+struct ExternalPluginEntry {
+    int extId = 0;
+    std::string trackId;                    // wrapper string track id
+    std::string name;                       // description.name
+    std::string format;                     // description.pluginFormatName
+    std::string uid;                        // description.createIdentifierString()
+    bool isInstrument = false;
+    tracktion::engine::Plugin::Ptr plugin;  // live instance
+};
+
+/** Normalised (0..1) parameter snapshot for a hosted external plugin. */
+struct ExtParamInfo {
+    juce::String name;
+    float normalised = 0.0f;
+};
 
 /**
  * @brief Tracktion Engine implementation of AudioEngine
@@ -410,6 +429,45 @@ class TracktionEngineWrapper : public AudioEngine,
      */
     juce::Array<juce::PluginDescription> getPreferredPluginTypes() const override;
 
+    // =========================================================================
+    // External AU/VST3 plugin hosting (CLI / serve)
+    // =========================================================================
+
+    /**
+     * @brief Instantiate an external plugin and insert it on a track
+     * @param track_id Wrapper track id ("track_N") or bare MAGDA numeric id ("N")
+     * @param desc Scanned plugin description to instantiate
+     * @param asInstrument Insert at index 0 (instrument slot, MIDI hits it)
+     *                     instead of appending to the fx slot
+     * @return Stable extId handle (>0), or 0 if the track/plugin failed
+     */
+    int addExternalPlugin(const std::string& track_id, const juce::PluginDescription& desc,
+                          bool asInstrument);
+
+    /** Remove a hosted external plugin by extId (true if found and removed). */
+    bool removeExternalPlugin(int extId);
+
+    /** Live entries for hosted external plugins (order of addition). */
+    const std::vector<ExternalPluginEntry>* externalPluginList() const {
+        return &externalPlugins_;
+    }
+
+    /** Normalised (0..1) parameters of a hosted external plugin. */
+    std::vector<ExtParamInfo> getExternalPluginParameters(int extId);
+
+    /** Set a hosted external plugin parameter by case-insensitive name. */
+    bool setExternalPluginParameter(int extId, const juce::String& paramName,
+                                    float normalised);
+
+    /** Full plugin state (XML chunk) of a hosted external plugin. */
+    bool getExternalPluginState(int extId, juce::String& outState);
+
+    /** Restore a hosted external plugin's state from an XML chunk. */
+    bool setExternalPluginState(int extId, const juce::String& state);
+
+    /** Bypass/unbypass a hosted external plugin (host power switch). */
+    void setExternalPluginBypass(int extId, bool bypassed);
+
     /**
      * @brief Save the plugin list to persistent storage
      * Called after plugin scanning completes
@@ -641,6 +699,10 @@ class TracktionEngineWrapper : public AudioEngine,
     int nextTrackId_ = 1;
     int nextClipId_ = 1;
     int nextEffectId_ = 1;
+
+    // Hosted external AU/VST3 plugin instances (see addExternalPlugin)
+    std::vector<ExternalPluginEntry> externalPlugins_;
+    int nextExternalPluginId_ = 1;
 
     // Per-track dedup during recordingFinished (multiple devices per track).
     // Populated in recordingFinished, cleared after transport stop.

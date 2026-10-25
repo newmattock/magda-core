@@ -768,6 +768,21 @@ juce::var toJson(const DeviceDto& dto) {
     object->setProperty("instrument", dto.instrument);
     object->setProperty("bypassed", dto.bypassed);
     object->setProperty("gainDb", dto.gainDb);
+    juce::Array<juce::var> parameters;
+    for (const auto& param : dto.parameters) {
+        auto paramObject = new juce::DynamicObject();
+        paramObject->setProperty("index", param.index);
+        paramObject->setProperty("name", param.name);
+        if (param.stableId.isNotEmpty())
+            paramObject->setProperty("stableId", param.stableId);
+        paramObject->setProperty("value", param.value);
+        paramObject->setProperty("min", param.minValue);
+        paramObject->setProperty("max", param.maxValue);
+        if (param.unit.isNotEmpty())
+            paramObject->setProperty("unit", param.unit);
+        parameters.add(paramObject);
+    }
+    object->setProperty("parameters", parameters);
     return object;
 }
 

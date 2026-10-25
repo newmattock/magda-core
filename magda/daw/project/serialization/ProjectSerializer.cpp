@@ -2,6 +2,8 @@
 
 #include <juce_data_structures/juce_data_structures.h>
 
+#include <cmath>
+
 #include "../../core/AutomationManager.hpp"
 #include "../../core/ClipManager.hpp"
 #include "../../core/LegacyDeviceAliases.hpp"
@@ -323,6 +325,10 @@ void ProjectSerializer::commitStaged(StagedProjectData& data) {
                 tm.ensureMixerAnalysisDeviceIdAbove(element.device.id);
             // Notify listeners so audio bridge creates TE plugins for master devices
             tm.notifyTrackDevicesChanged(MASTER_TRACK_ID);
+            // The master channel's mixer state travels in the same record.
+            tm.setMasterVolume(juce::jlimit(0.0f, 2.0f, data.masterTrack->volume));
+            tm.setMasterPan(juce::jlimit(-1.0f, 1.0f, data.masterTrack->pan));
+            tm.setMasterMuted(data.masterTrack->muted);
         }
     }
 }
@@ -405,10 +411,16 @@ juce::var ProjectSerializer::serializeProject(const ProjectInfo& info) {
     obj->setProperty("automation", serializeAutomation());
 
     // Serialize master track separately (its chain elements hold master bus plugins)
+    // (also when only the master's mixer state -- volume, pan, mute -- differs
+    // from the defaults: masterTrack mirrors the master channel, and without
+    // this a master fader move was lost on reload)
     auto* masterTrack = TrackManager::getInstance().getTrack(MASTER_TRACK_ID);
+    const auto& masterChannel = TrackManager::getInstance().getMasterChannel();
+    const bool masterMixerChanged = std::abs(masterChannel.volume - 1.0f) > 1.0e-6f ||
+                                    std::abs(masterChannel.pan) > 1.0e-6f || masterChannel.muted;
     if (masterTrack && (!masterTrack->chain.fxChainElements.empty() ||
                         !masterTrack->chain.postFxChainElements.empty() ||
-                        !masterTrack->chain.mixerAnalysisElements.empty())) {
+                        !masterTrack->chain.mixerAnalysisElements.empty() || masterMixerChanged)) {
         obj->setProperty("masterTrack", serializeTrackInfo(*masterTrack));
     }
 
@@ -594,6 +606,9 @@ bool ProjectSerializer::deserializeProject(const juce::var& json, ProjectInfo& o
             for (const auto& element : masterTrack->chain.mixerAnalysisElements)
                 tm.ensureMixerAnalysisDeviceIdAbove(element.device.id);
             tm.notifyTrackDevicesChanged(MASTER_TRACK_ID);
+            tm.setMasterVolume(juce::jlimit(0.0f, 2.0f, stagedMasterTrack.volume));
+            tm.setMasterPan(juce::jlimit(-1.0f, 1.0f, stagedMasterTrack.pan));
+            tm.setMasterMuted(stagedMasterTrack.muted);
         }
     }
 

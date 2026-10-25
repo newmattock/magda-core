@@ -138,7 +138,15 @@ class TrackManager : public daw::audio::DeviceIdAllocator, public daw::audio::De
 
     // Allocate an FX-section DeviceId (used by DrumGrid for per-pad chain plugins)
     DeviceId allocateDeviceId() override {
-        return nextFxDeviceId_++;
+        // One global space across fx-chain AND post-fx/analysis devices:
+        // separate counters let ids collide, which breaks findDevicePath()
+        // (it resolves to whichever chain it walks first).
+        const int next = std::max(nextFxDeviceId_,
+                                  std::max(nextPostFxDeviceId_, nextMixerAnalysisDeviceId_));
+        nextFxDeviceId_ = next + 1;
+        nextPostFxDeviceId_ = next + 1;
+        nextMixerAnalysisDeviceId_ = next + 1;
+        return next;
     }
     RackId allocateRackId() {
         return nextRackId_++;

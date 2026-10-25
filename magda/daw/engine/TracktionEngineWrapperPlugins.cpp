@@ -11,12 +11,14 @@
 #endif
 
 #include "../audio/plugins/InternalPluginRegistry.hpp"
+#include "../audio/AudioBridge.hpp"
 #include "../audio/plugins/compiled/CompiledPluginRegistry.hpp"
 #include "../audio/plugins/tracktion/TracktionInternalPluginAdapter.hpp"
 #include "../core/AppPaths.hpp"
 #include "PluginMetadataStore.hpp"
 #include "PluginScanCoordinator.hpp"
 #include "TracktionEngineWrapper.hpp"
+#include "ExternalPluginStateDialect.hpp"
 #include "core/Config.hpp"
 #include "core/PluginPreferences.hpp"
 
@@ -777,6 +779,205 @@ std::vector<ScannedPluginParameter> TracktionEngineWrapper::scanPluginParameters
         result.push_back(std::move(info));
     }
     return result;
+}
+
+// =============================================================================
+// External AU/VST3 plugin hosting (CLI / serve)
+// =============================================================================
+
+int TracktionEngineWrapper::addExternalPlugin(const std::string& track_id,
+                                              const juce::PluginDescription& desc,
+                                              bool asInstrument) {
+    if (!currentEdit_ || !audioBridge_)
+        return 0;
+
+    // CLI/serve address tracks by numeric MAGDA id; resolve the live
+    // AudioTrack through the bridge's TrackController.
+    tracktion::Track* track = nullptr;
+    try {
+        size_t parsed = 0;
+        const long number = std::stol(track_id, &parsed);
+        if (!track_id.empty() && parsed == track_id.size())
+            track = audioBridge_->getAudioTrack(static_cast<TrackId>(number));
+    } catch (...) {
+    }
+    auto* audioTrack = dynamic_cast<tracktion::AudioTrack*>(track);
+    if (audioTrack == nullptr)
+        return 0;
+
+    const TrackId numericId = [this, &track_id]() -> TrackId {
+        try {
+            size_t parsed = 0;
+            const long number = std::stol(track_id, &parsed);
+            if (!track_id.empty() && parsed == track_id.size())
+                return static_cast<TrackId>(number);
+        } catch (...) {
+        }
+        return INVALID_TRACK_ID;
+    }();
+    if (numericId == INVALID_TRACK_ID)
+        return 0;
+
+    // Route through PluginManager::loadExternalPlugin — the same path the GUI
+    // uses. It owns the VST3 uniqueId workaround, async-init checks and the
+    // plugin-lock discipline that raw insertPlugin lacks.
+    auto result =
+        audioBridge_->getPluginManager().loadExternalPlugin(
+            numericId, desc, asInstrument ? 0 : -1);
+    if (!result.success)
+        return 0;
+
+    // VST3 instances are created asynchronously BY DESIGN (JUCE forbids
+    // blocking message-thread creation for VST3). The completion callback
+    // fires on the message loop, so headless callers must pump until the
+    // instance reports initialised — otherwise teardown asserts/segfaults.
+    namespace te = tracktion::engine;
+    if (auto* ext = dynamic_cast<te::ExternalPlugin*>(result.plugin.get())) {
+        if (ext->isInitialisingAsync()) {
+            const auto deadline = juce::Time::getMillisecondCounter() + 45000;
+            while (ext->isInitialisingAsync()
+                   && juce::Time::getMillisecondCounter() < deadline) {
+                if (auto* mm = juce::MessageManager::getInstance())
+                    mm->runDispatchLoopUntil(20);
+                else
+                    juce::Thread::sleep(20);
+            }
+        }
+        // 'enabled' is the plugin's power state, NOT its load success — a
+        // freshly-created instance is enabled=true before any VST3 module
+        // has loaded. Success criterion: an async creation finished AND the
+        // wrapped processor exists.
+        const bool ok = !ext->isInitialisingAsync()
+                        && ext->getAudioPluginInstance() != nullptr;
+        if (!ok) {
+            auto err = ext->getLoadError();
+            std::cerr << "[ext-plugin] load failed: "
+                      << (err.isEmpty() ? juce::String("<no error text>") : err)
+                      << "\n";
+            result.plugin->removeFromParent();
+            return 0;
+        }
+    }
+
+    ExternalPluginEntry entry;
+    entry.extId = nextExternalPluginId_++;
+    entry.trackId = track_id;
+    entry.name = desc.name.toStdString();
+    entry.format = desc.pluginFormatName.toStdString();
+    entry.uid = desc.createIdentifierString().toStdString();
+    entry.isInstrument = asInstrument || desc.isInstrument;
+    entry.plugin = result.plugin;
+    externalPlugins_.push_back(std::move(entry));
+
+    return externalPlugins_.back().extId;
+}
+
+bool TracktionEngineWrapper::removeExternalPlugin(int extId) {
+    for (auto it = externalPlugins_.begin(); it != externalPlugins_.end(); ++it) {
+        if (it->extId != extId)
+            continue;
+        if (it->plugin != nullptr)
+            it->plugin->deleteFromParent();
+        externalPlugins_.erase(it);
+        return true;
+    }
+    return false;
+}
+
+std::vector<ExtParamInfo> TracktionEngineWrapper::getExternalPluginParameters(int extId) {
+    std::vector<ExtParamInfo> result;
+    for (const auto& entry : externalPlugins_) {
+        if (entry.extId != extId || entry.plugin == nullptr)
+            continue;
+        for (auto* parameter : entry.plugin->getAutomatableParameters()) {
+            if (parameter == nullptr)
+                continue;
+            ExtParamInfo info;
+            info.name = parameter->getParameterName();
+            if (info.name.isEmpty())
+                info.name = parameter->getLabel();
+            info.normalised = parameter->getCurrentNormalisedValue();
+            result.push_back(std::move(info));
+        }
+    }
+    return result;
+}
+
+bool TracktionEngineWrapper::setExternalPluginParameter(int extId, const juce::String& paramName,
+                                                        float normalised) {
+    const auto clamped = juce::jlimit(0.0f, 1.0f, normalised);
+    for (const auto& entry : externalPlugins_) {
+        if (entry.extId != extId || entry.plugin == nullptr)
+            continue;
+        for (auto* parameter : entry.plugin->getAutomatableParameters()) {
+            if (parameter == nullptr)
+                continue;
+            auto name = parameter->getParameterName();
+            if (name.isEmpty())
+                name = parameter->getLabel();
+            if (!name.equalsIgnoreCase(paramName))
+                continue;
+            // Host-initiated write: setParameterFromHost bypasses the modifier
+            // echo-guard that silently drops setParameter while modulated.
+            parameter->setParameterFromHost(
+                parameter->valueRange.convertFrom0to1(clamped), juce::sendNotificationSync);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool TracktionEngineWrapper::getExternalPluginState(int extId, juce::String& outState) {
+    for (const auto& entry : externalPlugins_) {
+        if (entry.extId != extId || entry.plugin == nullptr)
+            continue;
+        if (auto* ext = dynamic_cast<te::ExternalPlugin*>(entry.plugin.get())) {
+            ext->flushPluginStateToValueTree();
+            // Native chunk lives in the plugin's ValueTree under IDs::state
+            const auto chunkB64 = ext->state.getProperty(te::IDs::state).toString();
+            outState = chunkB64;
+            return !outState.isEmpty();
+        }
+        return false;
+    }
+    return false;
+}
+
+bool TracktionEngineWrapper::setExternalPluginState(int extId, const juce::String& state) {
+    namespace te = tracktion::engine;
+    for (const auto& entry : externalPlugins_) {
+        if (entry.extId != extId || entry.plugin == nullptr)
+            continue;
+        // Translation of the harness state dialect lives in
+        // ExternalPluginStateDialect.hpp so model-hosted devices share it.
+        if (auto* ext = dynamic_cast<te::ExternalPlugin*>(entry.plugin.get()))
+            return restoreExternalPluginStateDialect(
+                *ext, juce::MemoryBlock(state.toRawUTF8(), state.getNumBytesAsUTF8()));
+        return false;
+    }
+    return false;
+}
+
+void TracktionEngineWrapper::setExternalPluginBypass(int extId, bool bypassed) {
+    for (const auto& entry : externalPlugins_) {
+        if (entry.extId != extId || entry.plugin == nullptr)
+            continue;
+        if (auto* ext = dynamic_cast<te::ExternalPlugin*>(entry.plugin.get())) {
+            // Two-layer bypass: (1) TE's EngineBehaviour disabled-set — the
+            // token ExternalPlugin::isDisabled() compares against; and
+            // (2) the plugin's own enabled flag, which the node builder also
+            // honours. Replicating createIdentifierString() because it is a
+            // file-static helper inside TE.
+            const juce::String suffix =
+                "-" + juce::String::toHexString(ext->desc.fileOrIdentifier.hashCode())
+                + "-" + juce::String::toHexString(ext->desc.deprecatedUid);
+            const juce::String ident =
+                ext->desc.pluginFormatName + "-" + ext->desc.name + suffix;
+            ext->engine.getEngineBehaviour().setPluginDisabled(ident, bypassed);
+            ext->setEnabled(! bypassed);
+        }
+        return;
+    }
 }
 
 bool TracktionEngineWrapper::upsertGrooveTemplate(const GrooveTemplateData& data) {

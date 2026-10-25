@@ -971,14 +971,14 @@ TrackId TrackManager::duplicateTrack(TrackId trackId, bool includeDevices) {
     remapDuplicatedElements(newTrack.chain.fxChainElements, ChainNodePath::trackLevel(newTrack.id),
                             remap);
 
-    // Flat post-FX / mixer-analysis sections each carry their own section-local
-    // DeviceId counter, so the copied devices must be re-stamped with fresh ids
-    // from the right counter (sharing ids = sharing audio-engine plugin slots).
+    // Flat post-FX / mixer-analysis sections: re-stamp copied devices with
+    // fresh ids from the SHARED device-id space (allocateDeviceId keeps all
+    // sections collision-free; sharing ids = sharing audio-engine slots).
     // Empty when !includeDevices, so these loops are no-ops in that case.
     for (auto& element : newTrack.chain.postFxChainElements)
-        element.device.id = nextPostFxDeviceId_++;
+        element.device.id = allocateDeviceId();
     for (auto& element : newTrack.chain.mixerAnalysisElements)
-        element.device.id = nextMixerAnalysisDeviceId_++;
+        element.device.id = allocateDeviceId();
 
     // Log all device IDs after reassignment
     DBG("duplicateTrack: original trackId=" << trackId << " -> newTrackId=" << newTrack.id);
@@ -2116,7 +2116,7 @@ DeviceId TrackManager::addDeviceToPostFx(TrackId trackId, const DeviceInfo& devi
     }
 
     DeviceInfo newDevice = device;
-    newDevice.id = nextPostFxDeviceId_++;
+    newDevice.id = allocateDeviceId();  // shared space with fx-chain devices
     applyCachedCapabilitiesToDevice(newDevice);
     if (daw::audio::isInternalAnalysisPlugin(newDevice.pluginId))
         newDevice.deviceType = DeviceType::Analysis;
@@ -2181,7 +2181,7 @@ DeviceId TrackManager::addDeviceToMixerAnalysis(TrackId trackId, const DeviceInf
     }
 
     DeviceInfo newDevice = device;
-    newDevice.id = nextMixerAnalysisDeviceId_++;
+    newDevice.id = allocateDeviceId();  // shared space with fx/post-fx devices
     applyCachedCapabilitiesToDevice(newDevice);
     if (daw::audio::isInternalAnalysisPlugin(newDevice.pluginId))
         newDevice.deviceType = DeviceType::Analysis;

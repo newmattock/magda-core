@@ -119,6 +119,18 @@ struct ClipDto {
     bool operator==(const ClipDto&) const = default;
 };
 
+struct DeviceParamDto {
+    int index = -1;
+    juce::String name;      // human name, e.g. "Cutoff" (also used for by-name lookup)
+    juce::String stableId;  // persistent identifier, empty when unset
+    double value = 0.0;     // current REAL value
+    double minValue = 0.0;
+    double maxValue = 1.0;
+    juce::String unit;
+
+    bool operator==(const DeviceParamDto&) const = default;
+};
+
 struct DeviceDto {
     DeviceId id = INVALID_DEVICE_ID;
     TrackId trackId = INVALID_TRACK_ID;
@@ -130,6 +142,9 @@ struct DeviceDto {
     bool instrument = false;
     bool bypassed = false;
     double gainDb = 0.0;
+    // Populated parameter metadata (index/name/range/current value). Devices
+    // whose processors have not been instantiated may expose an empty list.
+    std::vector<DeviceParamDto> parameters;
 
     bool operator==(const DeviceDto&) const = default;
 };

@@ -167,6 +167,12 @@ DeviceDto makeDeviceDto(const DeviceInfo& device, TrackId trackId, std::optional
     dto.instrument = device.isInstrument;
     dto.bypassed = device.bypassed;
     dto.gainDb = device.gainDb;
+    for (const auto& param : device.parameters)
+        dto.parameters.push_back({param.paramIndex, param.name, param.stableId,
+                                  static_cast<double>(param.currentValue),
+                                  static_cast<double>(param.minValue),
+                                  static_cast<double>(param.maxValue),
+                                  param.unit});
     return dto;
 }
 

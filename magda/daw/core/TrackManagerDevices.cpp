@@ -1325,6 +1325,18 @@ ChainNodePath TrackManager::findDevicePath(DeviceId deviceId) const {
             }
         }
     }
+    // Also check the post-fx and mixer-analysis sections of every track
+    // (addDeviceToPostFx / addMixerAnalysisDevice allocate real ids, so those
+    // devices must be reachable by findDevicePath for parameter edits).
+    for (const auto& track : tracks_) {
+        for (const auto& element : track.chain.postFxChainElements)
+            if (element.device.id == deviceId)
+                return ChainNodePath::postFxDevice(track.id, deviceId);
+        for (const auto& element : track.chain.mixerAnalysisElements)
+            if (element.device.id == deviceId)
+                return ChainNodePath::mixerAnalysisDevice(track.id, deviceId);
+    }
+
     // Also check master track
     for (const auto& element : masterTrack_.chain.fxChainElements) {
         if (magda::isDevice(element) && magda::getDevice(element).id == deviceId)

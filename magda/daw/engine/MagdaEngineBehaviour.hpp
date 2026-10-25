@@ -48,6 +48,17 @@ class MagdaEngineBehaviour : public tracktion::EngineBehaviour {
         return {};
     }
 
+    // Host-controlled plugin power switch (serve `set_ext_bypass` op).
+    bool isPluginDisabled (const juce::String& pluginID) override {
+        return disabledPlugins.contains (pluginID);
+    }
+    void setPluginDisabled (const juce::String& pluginID, bool shouldBeDisabled) override {
+        if (shouldBeDisabled)
+            disabledPlugins.add (pluginID);
+        else
+            disabledPlugins.removeString (pluginID);
+    }
+
     // Return a full file path for new recordings — this has higher priority than
     // the %projectdir% pattern expansion, which can be overridden by editFileRetriever.
     juce::File getFileForNewAudioRecording(tracktion::Track& track,
@@ -82,6 +93,11 @@ class MagdaEngineBehaviour : public tracktion::EngineBehaviour {
         DBG("MagdaEngineBehaviour::createCustomPlugin - unknown type: " << type);
         return {};
     }
+
+  private:
+    // Identifiers of externally-hosted plugins the host has bypassed via
+    // serve `set_ext_bypass` (backing EngineBehaviour::isPluginDisabled).
+    juce::StringArray disabledPlugins;
 };
 
 }  // namespace magda
